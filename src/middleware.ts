@@ -1,12 +1,17 @@
-import NextAuth from "next-auth";
-import { authConfig } from "@/auth.config";
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
-// Edge-safe auth — uses JWT-only config with no Prisma/pg imports.
-const { auth } = NextAuth(authConfig);
+/**
+ * Clerk Middleware for Drafted Sports
+ * Protects /admin routes with super_admin role check
+ * Applies security headers to all responses
+ */
+
+// Routes that require super_admin authentication
+const isAdminRoute = createRouteMatcher(["/admin(.*)", "/api/admin(.*)"]);
 
 /**
- * Security headers applied to every response.
+ * Security headers applied to every response
  */
 function addSecurityHeaders(response: NextResponse): NextResponse {
   response.headers.set("X-Frame-Options", "DENY");
@@ -31,26 +36,37 @@ function addSecurityHeaders(response: NextResponse): NextResponse {
   return response;
 }
 
-export default auth((req) => {
-  const { pathname } = req.nextUrl;
-
+export default clerkMiddleware(async (auth, req) => {
   // ── Admin route protection ────────────────────────────────
-  if (pathname.startsWith("/admin")) {
-    const role = (req.auth?.user as Record<string, unknown> | undefined)?.role;
-    if (!req.auth || role !== "admin") {
-      const loginUrl = new URL("/auth/login", req.url);
-      loginUrl.searchParams.set("next", pathname);
-      return addSecurityHeaders(NextResponse.redirect(loginUrl));
-    }
-  }
+  if (isAdminRoute(req)) {
+    // Get auth session
+    const session = await auth();
 
-  // ── Admin API protection ──────────────────────────────────
-  if (pathname.startsWith("/api/admin")) {
-    const role = (req.auth?.user as Record<string, unknown> | undefined)?.role;
-    if (!req.auth || role !== "admin") {
-      return addSecurityHeaders(
-        NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-      );
+    // Check if user is authenticated
+    if (!session.userId) {
+      // Redirect to Clerk sign-in
+      const signInUrl = new URL("/sign-in", req.url);
+      signInUrl.searchParams.set("redirect_url", req.nextUrl.pathname);
+      return addSecurityHeaders(NextResponse.redirect(signInUrl));
+    }
+
+    // Get the user's role from Clerk metadata
+    const userRole = session.user?.publicMetadata?.role as string | undefined;
+
+    // Check if user has super_admin role
+    if (userRole !== "super_admin") {
+      // For API routes, return 401
+      if (req.nextUrl.pathname.startsWith("/api/admin")) {
+        return addSecurityHeaders(
+          NextResponse.json(
+            { error: "Unauthorized: super_admin role required" },
+            { status: 401 }
+          )
+        );
+      }
+
+      // For UI routes, redirect to home
+      return addSecurityHeaders(NextResponse.redirect(new URL("/", req.url)));
     }
   }
 
@@ -60,6 +76,7 @@ export default auth((req) => {
 
 export const config = {
   matcher: [
+    // Skip Next.js internals and static files
     "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
